@@ -121,6 +121,8 @@ decouple train --family pix2pix --prepared artifacts/prepared \
 
 正式默认配方在 `consistent_cdm/recipes/`，均不包含数据路径或队列统计。`--config MY.yaml` 可替换训练超参数，数据 split、尺寸和 D scale 仍由 prepared 目录注入。`--max-steps`、`--batch-size` 可覆盖常用参数。较小患者队列需要适当减小 batch size。
 
+Diffusion 的 YAML 是 `consistent_cdm/recipes/diffusion.yaml`，Flow Matching 的 YAML 是 `consistent_cdm/recipes/flow_matching.yaml`。每次启动训练还会在对应 run 中保存填入数据路径、患者划分和实际 D scale 的完整 `recipe.yaml`。
+
 结果统一保存到 `runs/<family>/<run_id>/`：resolved recipe、准备元数据、`checkpoints/`、模型支持的 `samples/` 及 `telemetry/train.log`；监控依赖关闭时仍保存训练/验证日志。可通过 `CONSISTENT_CDM_RUNS_ROOT` 指定整个 runs 根目录。run ID 不覆盖已有结果；继续训练需要明确指定 checkpoint：
 
 ```bash
@@ -166,6 +168,25 @@ decouple infer --checkpoint /path/to/checkpoint.pt \
 
 ## 验证与维护
 
+原生 D-only diffusion/flow checkpoint 即使没有新接口的 `config.family`，也会依据内嵌配置自动识别，保留原始网络参数及采样设置。旧 checkpoint 的存储通道顺序不自动升级为已验证的解剖侧别，manifest 明确标为 `historical_stored_order_unverified`。不兼容旧双输出 checkpoint。
+
+可用真实 checkpoint 运行独立的功能验证：
+
+```bash
+python scripts/validate_pretrained.py --checkpoint /path/to/original/checkpoint.pt \
+  --input /path/to/development_full.npy --output artifacts/validation/pretrained \
+  --real-input /path/to/real.jpg --calibration /path/to/train_only_calibration.json \
+  --device cpu --repeat --check-loss --check-resume
+```
+
+验证使用原配置的完整采样步数，保存 EMA 严格加载、checkpoint 步数和哈希、固定 seed 重现、训练损失前向、F/D/L/R 及硬解码恒等式的检查结果；不更新权重、不运行冻结测试集或生成准确率结论。`--check-resume` 另外调用原生训练恢复入口，验证 model、EMA、优化器状态及 step 的读取；不继续优化，也不声明跨设备或批次级完全重现。
+
+统一 `decouple train --resume` 还会校验新流程的 `prepared_id`。旧 checkpoint 没有该 ID，因此上述状态恢复检查不等同于将旧权重自动接续到新的患者划分。
+
+已有模型推理结果可保存在本地 `artifacts/imported/`，复制清单与校验结果在 `artifacts/migration/`。这些数据、报告及新增验证输出均被 Git 忽略，不随 clone 下载；保留原文件和原结论，不用新的采样器覆写旧结果。迁移后的 D sampler 不再隐式裁剪标准化 D，因此不承诺与旧采样代码逐像素等价。
+
+本次原权重检查采用 diffusion 的 step 65,000 `best_ema.pt` 和 flow matching 的 step 100,000 `last.pt`。Diffusion 的旧 `last.pt` 仅到 60,000 步，Flow 的主要 `best_ema.pt` 为 99,000 步，因此不以文件名代替训练步数判断最新状态。功能验证记录在本地 `artifacts/validation/pretrained_20261031/`；历史结果已按哈希迁入本地，包含四类 D-only 模型、历史 baseline、真实侧位片和锁定最终报告，未重新评估冻结测试集。
+
 ```bash
 python -m unittest discover -s tests -v
 python -m unittest discover -s Data_process/tests -v
@@ -175,4 +196,4 @@ DECOUPLE_TRAINING_SMOKE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 
 集成 smoke 使用临时非对称 CBCT phantom 和已有分割，覆盖预处理→数据准备→短训练→推理。`--tiny` 仅用于小网络接口验证，不用于报告性能。数据、权重和生成产物不进入 Git。
 
-本次迁移通过安装后脱离源码目录的 42 项 CPU 测试（含完整 phantom 流程），并验证四类模型的短训练、恢复至第 2 步及配对验证。真实 nnU-Net 资源预检查已通过；无可用 GPU，未验证真实 nnU-Net GPU 分割或完整规模训练。现有 D-only 权重可通过显式 `--family` 接入，但不保证旧双输出 checkpoint 兼容。
+当前代码已通过安装后脱离源码目录的 47 项 CPU 测试（含完整 phantom 流程），并验证四类模型的短训练、恢复至第 2 步及配对验证。真实 nnU-Net 资源预检查已通过；无可用 GPU，未验证真实 nnU-Net GPU 分割或完整规模训练。

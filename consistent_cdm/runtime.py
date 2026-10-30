@@ -279,10 +279,21 @@ def load_predictor(checkpoint, *, device="cpu", family=None, config=None):
         cfg = load_config(config)
     if cfg is None:
         raise ValueError("Checkpoint must embed config, or supply --config")
-    selected_family = family or cfg.get("family")
+    declared_family = cfg.get("family")
+    if declared_family is None and "diffusion" in cfg:
+        # Original native checkpoints predate the unified family field. The
+        # model factory already interprets this embedded generative setting;
+        # derive dispatch from the same setting without rewriting the recipe.
+        from consistent_cdm.contracts import TargetContract
+        from consistent_cdm.factories import generative_run_group
+        target_cfg = cfg["diffusion"].get("target_parameterization") or cfg.get("target_parameterization")
+        contract = TargetContract.from_config(target_cfg, raw_value_scale=1.0)
+        if contract.is_d_only:
+            declared_family = generative_run_group(cfg)
+    selected_family = family or declared_family
     if selected_family not in FAMILIES:
         raise ValueError("Checkpoint lacks a supported family; supply --family explicitly")
-    if cfg.get("family") and selected_family != cfg["family"]:
+    if declared_family and selected_family != declared_family:
         raise ValueError("Requested family disagrees with checkpoint config")
     norm = state.get("d_normalization") or cfg["dataset"]["train"].get("d_only_normalization")
     if not norm or not math.isfinite(float(norm["scale"])) or float(norm["scale"]) <= 0:
@@ -396,7 +407,7 @@ def infer(args):
     manifest = dict(schema_version=1,family=family,checkpoint=str(Path(args.checkpoint).resolve()),
                     checkpoint_sha256=sha256(args.checkpoint),weights=weights,seed=args.seed,d_scale=scale,
                     sampler=cfg.get("validation",{}).get("sampler") if family in ("diffusion","flow_matching") else None,
-                    side_contract=SIDE_CONTRACT,decoder="L=F_raw/2+D; R=F_raw/2-D; no clipping",
+                    side_contract=cfg.get("side_contract", "historical_stored_order_unverified"),decoder="L=F_raw/2+D; R=F_raw/2-D; no clipping",
                     calibration=calibration,display="F:[0,6]; half/L/R:[0,3]; D:symmetric train scale",
                     scope="condition_only_no_paired_accuracy_metrics",images=rows)
     write_json(output/"manifest.json",manifest)

@@ -203,6 +203,32 @@ class PipelineTests(unittest.TestCase):
                 np.testing.assert_array_equal(d1, d2)
                 np.testing.assert_array_equal(d1, np.load(folder / 'd.npy'))
 
+    def test_original_generative_checkpoints_infer_family_without_rewriting_config(self):
+        prepared = self.prepare()
+        from consistent_cdm.utils.checkpointing import load_checkpoint_file
+        for family in ('diffusion', 'flow_matching'):
+            checkpoint = self.checkpoint(family, prepared)
+            state = load_checkpoint_file(checkpoint, torch.device('cpu'))
+            state['config'].pop('family')
+            state['config'].pop('side_contract')
+            if family == 'diffusion':
+                state['config'].pop('generative')
+            torch.save(state, checkpoint)
+            model, cfg, detected, scale, weights = runtime.load_predictor(checkpoint)
+            self.assertEqual(detected, family)
+            self.assertEqual(weights, 'ema_model')
+            self.assertNotIn('family', cfg)
+            self.assertEqual(cfg, state['config'])
+            output = self.root / f'legacy_inference_{family}'
+            manifest = runtime.infer(Namespace(checkpoint=checkpoint,
+                input=self.data / 'patient_a' / 'projections' / 'std_full.npy', output=output,
+                device='cpu', family=None, config=None, calibration=None, mapping=None,
+                nose_direction='right', invert=False, crop=None, seed=1234))
+            self.assertEqual(manifest['side_contract'], 'historical_stored_order_unverified')
+            wrong = 'diffusion' if family == 'flow_matching' else 'flow_matching'
+            with self.assertRaisesRegex(ValueError, 'disagrees'):
+                runtime.load_predictor(checkpoint, family=wrong)
+
 
 if __name__ == '__main__':
     unittest.main()
