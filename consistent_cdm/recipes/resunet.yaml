@@ -1,0 +1,102 @@
+# ResUNet-96 with fixed-scale D and L1 only.
+# Dataset paths, patient split and fixed D scale are injected by decouple train.
+seed: 1234
+device: null
+dataset:
+  train:
+    type: case_folders
+    split: train
+    variants:
+    - std
+    - aug
+    condition_template: '{variant}_full.npy'
+    target_templates:
+    - '{variant}_left.npy'
+    - '{variant}_right.npy'
+    target_mode: dual
+    image_size:
+    - 256
+    - 256
+    normalize: fixed_range_m11
+    value_range:
+    - 0.0
+    - 6.0
+    clip_range:
+    - 0.0
+    - 6.0
+  val:
+    type: case_folders
+    split: val
+    variants:
+    - std
+    - aug
+    condition_template: '{variant}_full.npy'
+    target_templates:
+    - '{variant}_left.npy'
+    - '{variant}_right.npy'
+    target_mode: dual
+    image_size:
+    - 256
+    - 256
+    normalize: fixed_range_m11
+    value_range:
+    - 0.0
+    - 6.0
+    clip_range:
+    - 0.0
+    - 6.0
+model:
+  image_size: 256
+  base_channels: 96
+  channel_mults:
+  - 1
+  - 2
+  - 4
+  - 8
+  blocks_per_level: 2
+  dropout: 0.1
+  attention_resolutions:
+  - 16
+  attention_heads: 4
+  norm_groups: 8
+  use_se: true
+  final_activation: identity
+d_normalization:
+  method: abs_percentile
+  quantile: 0.95
+  max_samples: 4000000
+loss:
+  name: fixed_scale_d_l1_only
+train:
+  max_steps: 200000
+  batch_size: 16
+  val_batch_size: 16
+  num_workers: 4
+  lr: 0.0002
+  lr_schedule:
+    enabled: true
+    type: cosine_with_warmup
+    warmup_steps: 5000
+    warmup_start_lr: 0.0
+    min_lr: 2.0e-05
+  betas:
+  - 0.9
+  - 0.999
+  weight_decay: 1.0e-06
+  amp: true
+  grad_clip: 1.0
+  ema_decay: 0.999
+  ema_start_step: 100
+  validate_every_steps: 1000
+  log_every_steps: 50
+validation:
+  physics_visual_limit: 0
+logging:
+  use_swanlab: false
+  use_tensorboard: false
+  project: cbct-decoupling
+  experiment_name: null
+  mode: local
+output:
+  root: null
+family: resunet

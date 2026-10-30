@@ -1,0 +1,76 @@
+side_contract:
+  version: anatomical_lps_label8_left_v2
+  patient_left_label: 8
+  patient_right_label: 9
+  projection_channels:
+  - left
+  - right
+labels:
+  left: 8
+  right: 9
+alignment:
+  image_fill_hu: -1000.0
+  preserve_input_grid: true
+  maximum_input_angle_deg: 14.0
+  maximum_residual_angle_deg: 1.0
+split:
+  boundary_goes_to: left
+  save_masks: true
+attenuation:
+  water_mu_per_mm: 0.022
+  air_hu: -1000.0
+projection:
+  device: auto
+  sad_mm: 1000.0
+  sid_mm: 1500.0
+  detector_pixel_spacing_mm:
+  - 0.5625
+  - 0.5625
+  detector_padding_pixels:
+  - 32
+  - 32
+  raw_size: null
+  step_size_mm: 0.5
+  chunk_size: 8192
+  output_size:
+  - 512
+  - 512
+  flip_lr: anatomical_anterior_right
+  crop:
+    mode: content
+    threshold_fraction: 0.02
+    padding_pixels:
+    - 0
+    - 0
+    - 0
+    - 0
+    trim_pixels:
+    - 40
+    - 40
+    - 45
+    - 20
+  variants:
+  - name: std
+    primary_angle_deg: 0.0
+  - name: aug
+    sample_normal_deg:
+      mean: 3.19
+      std: 2.13
+      max_abs: 8.3
+      random_sign: true
+  global_seed: 1234
+nnunet:
+  enabled: true
+  executable: nnUNetv2_predict
+  dataset: '015'
+  configuration: 3d_fullres
+  trainer: nnUNetTrainerNoMirroring
+  plans: nnUNetPlans
+  folds:
+  - all
+  extra_args: []
+  results_dir: null
+  checkpoint: checkpoint_final.pth
+runtime:
+  overwrite: false
+  continue_on_error: true

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cbct-preprocess"
+version = "0.1.0"
+description = "Geometry-consistent CBCT alignment, split and DRR pipeline"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "SimpleITK>=2.3",
+  "torch>=2.0",
+  "Pillow>=9",
+  "PyYAML>=6",
+]
+
+[project.scripts]
+cbct-preprocess = "cbct_preprocess.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+[project.optional-dependencies]
+segmentation = ["nnunetv2==2.6.4"]
+
+[tool.setuptools.package-data]
+cbct_preprocess = ["recipes/*.yaml"]

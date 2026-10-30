@@ -1,0 +1,103 @@
+# Dataset paths, patient split and fixed D scale are injected by decouple train.
+seed: 1234
+device: null
+dataset:
+  train:
+    type: case_folders
+    split: train
+    variants: &id001
+    - std
+    - aug
+    condition_template: '{variant}_full.npy'
+    target_templates: &id002
+    - '{variant}_left.npy'
+    - '{variant}_right.npy'
+    target_mode: dual
+    image_size: &id003
+    - 256
+    - 256
+    normalize: fixed_range_m11
+    value_range: &id004
+    - 0.0
+    - 6.0
+    clip_range: &id005
+    - 0.0
+    - 6.0
+  val:
+    type: case_folders
+    split: val
+    variants: *id001
+    condition_template: '{variant}_full.npy'
+    target_templates: *id002
+    target_mode: dual
+    image_size: *id003
+    normalize: fixed_range_m11
+    value_range: *id004
+    clip_range: *id005
+d_normalization:
+  method: abs_percentile
+  quantile: 0.95
+  max_samples: 4000000
+model:
+  generator:
+    image_size: 256
+    base_channels: 64
+    channel_mults:
+    - 1
+    - 2
+    - 4
+    - 8
+    blocks_per_level: 2
+    dropout: 0.1
+    attention_resolutions:
+    - 16
+    attention_heads: 4
+    norm_groups: 8
+    use_se: true
+    final_activation: identity
+  discriminator:
+    base_channels: 64
+    num_layers: 4
+    num_scales: 2
+    spectral_norm: true
+loss:
+  loss_contract: hinge_cgan_plus_100_l1_d_only
+  adversarial_weight: 1.0
+  image_weight: 100.0
+train:
+  max_steps: 200000
+  batch_size: 16
+  val_batch_size: 16
+  num_workers: 4
+  lr_g: 0.0002
+  lr_d: 0.0002
+  lr_schedule:
+    enabled: true
+    type: cosine_with_warmup
+    warmup_steps: 5000
+    warmup_start_lr: 0.0
+    min_lr: 2.0e-05
+  betas_g:
+  - 0.5
+  - 0.999
+  betas_d:
+  - 0.5
+  - 0.999
+  weight_decay_g: 1.0e-06
+  weight_decay_d: 0.0
+  amp: true
+  ema_decay: 0.999
+  ema_start_step: 100
+  validate_every_steps: 1000
+  save_every_steps: 10000
+  log_every_steps: 50
+  resume_checkpoint: null
+logging:
+  use_swanlab: false
+  use_tensorboard: false
+  project: cbct-decoupling
+  experiment_name: null
+  mode: local
+output:
+  root: null
+family: pix2pix

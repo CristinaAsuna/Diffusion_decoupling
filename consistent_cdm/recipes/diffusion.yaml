@@ -1,0 +1,128 @@
+# Dataset paths, patient split and fixed D scale are injected by decouple train.
+seed: 1234
+device: null
+dataset:
+  train:
+    type: case_folders
+    split: train
+    variants: &id001
+    - std
+    - aug
+    condition_template: '{variant}_full.npy'
+    target_templates: &id002
+    - '{variant}_left.npy'
+    - '{variant}_right.npy'
+    target_mode: dual
+    image_size: &id003
+    - 256
+    - 256
+    normalize: fixed_range_m11
+    value_range: &id004
+    - 0.0
+    - 6.0
+    clip_range: &id005
+    - 0.0
+    - 6.0
+  val:
+    type: case_folders
+    split: val
+    variants: *id001
+    condition_template: '{variant}_full.npy'
+    target_templates: *id002
+    target_mode: dual
+    image_size: *id003
+    normalize: fixed_range_m11
+    value_range: *id004
+    clip_range: *id005
+model:
+  image_size: 256
+  inner_channel: 64
+  channel_mults:
+  - 1
+  - 2
+  - 4
+  - 8
+  res_blocks: 2
+  attn_res:
+  - 8
+  num_head_channels: 32
+  dropout: 0.05
+  resblock_updown: true
+  use_scale_shift_norm: true
+  branch_decoder:
+    enabled: false
+diffusion:
+  beta_schedule:
+    schedule: cosine
+    n_timestep: 1000
+    zero_terminal_snr: true
+  prediction_type: v_prediction
+  target_parameterization:
+    type: d_only
+    already_standardized: true
+    clamp_decoded: false
+  min_snr:
+    enabled: true
+    gamma: 5.0
+  x0_reconstruction_loss:
+    enabled: true
+    lambda: 0.05
+    loss: l1
+    clamp: false
+  consistency_loss:
+    enabled: false
+  difference_loss:
+    enabled: false
+  difference_edge_loss:
+    enabled: false
+train:
+  max_steps: 100000
+  batch_size: 8
+  val_batch_size: 16
+  num_workers: 0
+  lr: 0.0001
+  lr_schedule:
+    enabled: true
+    type: cosine_with_warmup
+    warmup_steps: 10000
+    warmup_start_lr: 0.0
+    min_lr: 2.0e-05
+  weight_decay: 0.0
+  resume_checkpoint: null
+  ema_decay: 0.9999
+  ema_start_step: 100
+  validate_every_steps: 1000
+  save_every_steps: 10000
+  log_every_steps: 50
+  best_metric: val_d_nmae
+  early_stop:
+    enabled: true
+    patience_validations: 20
+    min_delta: 0.0
+    score:
+      metric: val_d_nmae
+validation:
+  max_batches: null
+  sampling_seed: 1234
+  fid_every_steps: 0
+  physics_visual_limit: 0
+  preview:
+    channels:
+    - 0
+    save_png: true
+    save_npy: true
+    swanlab: false
+    tensorboard: false
+  sampler:
+    sampler: dpm_solver_pp
+    steps: 30
+    solver_order: 2
+logging:
+  use_swanlab: false
+  use_tensorboard: false
+  project: cbct-decoupling
+  experiment_name: null
+  mode: local
+output:
+  root: null
+family: diffusion

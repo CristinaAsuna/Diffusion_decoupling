@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cbct-decoupling"
+version = "0.1.0"
+description = "CBCT preprocessing and hard-additive left/right projection decomposition"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.1",
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "Pillow>=9",
+  "PyYAML>=6",
+  "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+preprocess = ["SimpleITK>=2.3"]
+segmentation = ["SimpleITK>=2.3", "nnunetv2==2.6.4"]
+monitoring = ["tensorboard>=2.14", "swanlab>=0.3"]
+test = ["pytest>=7"]
+
+[project.scripts]
+decouple = "consistent_cdm.cli:main"
+cbct-preprocess = "cbct_preprocess.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-dir]
+cbct_preprocess = "Data_process/src/cbct_preprocess"
+
+[tool.setuptools.packages.find]
+where = [".", "Data_process/src"]
+include = ["consistent_cdm", "consistent_cdm.*", "cbct_preprocess", "cbct_preprocess.*"]
+exclude = ["tests", "tests.*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+consistent_cdm = ["recipes/*.yaml"]
+cbct_preprocess = ["recipes/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "Data_process/tests"]
