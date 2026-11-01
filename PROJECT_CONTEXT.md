@@ -110,7 +110,7 @@ condition 单独裁剪并映射 `[0,6]→[-1,1]`；解码仍用原始 Full。
   - 紧裁剪造成的 FOV/尺度差；
   - 训练无强度/退化增广。
 
-  `decouple stress-test` 与 `scripts/domain_stats.py` 用于在 val 上逐项定位原因；结论须以其结果为准。
+  `decouple stress-test` 与 `scripts/domain_stats.py` 用于在 val 上逐项定位原因；结论须以其结果为准。执行步骤与判据见 `docs/SIM2REAL_DIAGNOSIS.md`。
 
 后续首先需要核实数据/权重侧别来路，并在独立的真实参考或合格标注下验证泛化。
 真实图像没有配对 L/R，不能以输出和等于 Full、视觉更清晰或生成谱相似替代准确率。
