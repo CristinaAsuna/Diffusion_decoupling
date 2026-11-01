@@ -44,6 +44,16 @@ def main(argv=None):
     evaluation.add_argument("--output",required=True)
     evaluation.add_argument("--seed",type=int,default=1234)
     evaluation.add_argument("--device",default="cpu")
+    stress=commands.add_parser("stress-test",help="Validation D metrics under controlled condition degradations")
+    stress.add_argument("--checkpoint",required=True)
+    stress.add_argument("--prepared",required=True)
+    stress.add_argument("--output",required=True)
+    stress.add_argument("--operators",nargs="+",help="Subset of degradations; default all")
+    stress.add_argument("--mapping",choices=["raw","quantile"],default="quantile",
+                        help="Condition mapping after degradation; quantile matches real-image inference")
+    stress.add_argument("--max-cases",type=int,help="Use only the first N validation patients")
+    stress.add_argument("--seed",type=int,default=1234)
+    stress.add_argument("--device",default="cpu")
     args=parser.parse_args(argv)
     from consistent_cdm import runtime
     try:
@@ -53,6 +63,8 @@ def main(argv=None):
             print(f"Prepared {len(result['split']['train'])} train / {len(result['split']['val'])} validation patients; s_D={result['d_normalization']['scale']:.8g}")
         elif args.command=="train": print(runtime.train(args))
         elif args.command=="infer": print(f"Saved {len(runtime.infer(args)['images'])} predictions to {args.output}")
+        elif args.command=="stress-test":
+            runtime.stress_test(args); print(f"Saved degradation stress test to {args.output}")
         else:
             runtime.evaluate(args); print(f"Saved paired validation to {args.output}")
     except (ValueError,FileNotFoundError,FileExistsError) as error:

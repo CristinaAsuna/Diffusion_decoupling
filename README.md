@@ -173,6 +173,31 @@ decouple infer --checkpoint /path/to/checkpoint.pt \
 
 每张图保存 `full.npy`、`d.npy`、`left.npy`、`right.npy`、`preview.png`。根 manifest 记录输入/checkpoint 哈希、强度映射、方向、seed、solver、scale 和解码方式。原始 L/R 不裁剪、不平滑；仅预览使用固定显示窗，L/R 共用 `[0,3]`，F 使用 `[0,6]`。输出尺寸为模型尺寸，不伪造原始分辨率细节。无配对真实 L/R 时不输出重建准确率。
 
+## 5. 跨域诊断（无真实配对，不产生真实准确率）
+
+`stress-test` 在固定 val 患者上对 raw Full 施加受控退化，看 D 在什么条件下塌缩：
+
+```bash
+decouple stress-test --prepared artifacts/prepared \
+  --checkpoint runs/diffusion/<run_id>/checkpoints/best_ema.pt \
+  --output artifacts/stress/diffusion_v1 --max-cases 20 --device cuda
+```
+
+- 强度类退化（`exponential`、`gamma`、`blur`、`noise`、`scatter`、`unsharp`、`equalize`、`invert`）只改条件 F，L/R 不变。
+- 几何类退化（`scale`、`rotate`、`translate`）对 F/L/R 做同一线性重采样，F=L+R 仍成立。
+- 像素参数按模型分辨率计。退化先在原始分辨率上施加，再做 resize 和 `--mapping`（默认 `quantile`，与真实推理一致）。
+- L/R 用干净线积分（oracle F）解码，因此指标只反映 D 估计的变化。
+- 主要看 `asymmetry.energy_ratio`、`identity` 和 `d_rms_over_scale`：energy_ratio 趋近 0 表示塌缩到 Full/2。
+- `conditions/` 保存首个视图在各退化下的条件图，可与真实片目视对比。
+- 这些退化算子是诊断用近似，不是扫描仪标定。
+
+`scripts/domain_stats.py` 比较真实片和 val DRR 的条件统计：径向功率谱、梯度分位数、前景比例和直方图。传 `--checkpoint` 时会再报告预测 D 的 RMS/s_D 及 GT 参考值；加 `--sweep` 会对真实片遍历反相、鼻尖朝向和中心缩放：
+
+```bash
+python scripts/domain_stats.py --prepared artifacts/prepared --real /path/to/real_images \
+  --checkpoint /path/to/checkpoint.pt --output artifacts/domain_stats/v1 --max-cases 20 --sweep
+```
+
 ## 验证与维护
 
 原生 D-only diffusion/flow checkpoint 即使没有新接口的 `config.family`，也会依据内嵌配置自动识别，保留原始网络参数及采样设置。旧 checkpoint 的存储通道顺序不自动升级为已验证的解剖侧别，manifest 明确标为 `historical_stored_order_unverified`。不兼容旧双输出 checkpoint。

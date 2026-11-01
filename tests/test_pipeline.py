@@ -106,6 +106,30 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual({row['method'] for row in rows}, {'resunet', 'full_half'})
         self.assertTrue((output / 'patient_c__std' / 'd.npy').is_file())
 
+    def test_stress_test_clean_row_matches_evaluate(self):
+        prepared = self.prepare()
+        checkpoint = self.checkpoint('resunet', prepared)
+        scores = runtime.evaluate(Namespace(prepared=self.root / 'prepared', checkpoint=checkpoint,
+                                            output=self.root / 'validation', device='cpu', seed=1234))
+        output = self.root / 'stress'
+        summary = runtime.stress_test(Namespace(prepared=self.root / 'prepared', checkpoint=checkpoint,
+                                                output=output, device='cpu', seed=1234, mapping='raw',
+                                                operators=['blur', 'scale'], max_cases=None))
+        clean = {(row['method'], row['operator']): row for row in summary if row['level'] == 0}
+        for method in ('resunet', 'full_half'):
+            self.assertAlmostEqual(clean[(method, 'none')]['asymmetry.nmae'],
+                                   scores[method]['asymmetry.nmae'], places=5)
+        self.assertEqual({(row['operator'], row['level']) for row in summary if row['method'] == 'resunet'},
+                         {('none', 0.), ('blur', .5), ('blur', 1.), ('blur', 2.), ('blur', 4.),
+                          ('scale', .7), ('scale', .85), ('scale', 1.15), ('scale', 1.3)})
+        saved = json.loads((output / 'summary.json').read_text())
+        self.assertEqual(saved['cohort'], 'validation_only')
+        self.assertTrue((output / 'conditions' / 'blur_2.png').is_file())
+        with self.assertRaises(ValueError):
+            runtime.stress_test(Namespace(prepared=self.root / 'prepared', checkpoint=checkpoint,
+                                          output=self.root / 'bad', device='cpu', seed=1234, mapping='raw',
+                                          operators=['unknown'], max_cases=None))
+
     def test_d_metrics_distinguish_perfect_collapse_and_swap(self):
         from consistent_cdm.evaluation.data_metrics import asymmetry_metrics
         d = np.array([[-.5,.25],[.2,-.1]], dtype=np.float32)

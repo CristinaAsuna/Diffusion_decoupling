@@ -329,6 +329,20 @@ def predict(model, family, cfg, scale, full_raw, *, seed=1234):
     return d, full_raw / 2 + d, full_raw / 2 - d
 
 
+def map_intensity(full, mapping, calibration):
+    """Apply the raw or train-only p1/p50/p99 condition mapping."""
+    if mapping == "raw": return full, None
+    if mapping != "quantile": raise ValueError(f"Unsupported mapping {mapping}")
+    if not calibration: raise ValueError("Quantile mapping needs train-only calibration")
+    reference = np.asarray(calibration["raw_full_quantiles"], dtype=np.float32)
+    source_quantiles = np.percentile(full, [1,50,99])
+    if reference.shape != (3,) or not np.isfinite(reference).all() or np.any(np.diff(reference) <= 1e-8):
+        raise ValueError("Calibration requires increasing finite p1/p50/p99")
+    if np.any(np.diff(source_quantiles) <= 1e-8):
+        raise ValueError("Input has degenerate intensity quantiles")
+    return np.interp(full, source_quantiles, reference).astype(np.float32), source_quantiles
+
+
 def load_input(path, *, size, mapping=None, calibration=None, nose_direction="right", invert=False, crop=None):
     path = Path(path)
     raw_npy = path.suffix.lower() == ".npy"
@@ -352,17 +366,7 @@ def load_input(path, *, size, mapping=None, calibration=None, nose_direction="ri
     if invert: source = float(source.max()) + float(source.min()) - source
     full = resize_raw(source, size)
     mapping = mapping or ("raw" if raw_npy else "quantile")
-    source_quantiles = None
-    if mapping == "quantile":
-        if not calibration: raise ValueError("Quantile mapping needs train-only calibration")
-        reference = np.asarray(calibration["raw_full_quantiles"], dtype=np.float32)
-        source_quantiles = np.percentile(full, [1,50,99])
-        if reference.shape != (3,) or not np.isfinite(reference).all() or np.any(np.diff(reference) <= 1e-8):
-            raise ValueError("Calibration requires increasing finite p1/p50/p99")
-        if np.any(np.diff(source_quantiles) <= 1e-8):
-            raise ValueError("Input has degenerate intensity quantiles")
-        full = np.interp(full, source_quantiles, reference).astype(np.float32)
-    elif mapping != "raw": raise ValueError(f"Unsupported mapping {mapping}")
+    full, source_quantiles = map_intensity(full, mapping, calibration)
     return full, dict(original_shape=original_shape, output_shape=list(full.shape), mapping=mapping,
                       source_quantiles=None if source_quantiles is None else source_quantiles.tolist(),
                       nose_direction=nose_direction, invert=invert, crop=crop,
@@ -450,4 +454,76 @@ def evaluate(args):
         return value
     write_json(output/"summary.json",finite(dict(patient_macro=summary,prepared_id=prepared["prepared_id"],
                checkpoint_sha256=sha256(args.checkpoint),weights=weights,seed=args.seed,cohort="validation_only")))
+    return summary
+
+
+STRESS_SUMMARY_KEYS = ("asymmetry.nmae", "asymmetry.identity", "asymmetry.signed_gain", "asymmetry.energy_ratio",
+                       "asymmetry_rich.nmae", "asymmetry_rich.identity", "asymmetry_rich.energy_ratio",
+                       "side_average.psnr", "side_average.ssim", "d_rms_over_scale", "condition_saturation_fraction")
+
+
+def stress_test(args):
+    """Score D on validation patients under controlled condition degradations.
+
+    L/R are decoded with the clean (oracle) line integral so the metrics isolate
+    how each degradation changes the D estimate; ``d_rms_over_scale`` needs no
+    target and is directly comparable with real-image inference.
+    """
+    from consistent_cdm.evaluation.data_metrics import branch_metrics, flatten_metrics
+    from consistent_cdm.evaluation.degradations import DEGRADATIONS, degrade
+    prepared = read_prepared(args.prepared)
+    verify_prepared(prepared)
+    model,cfg,family,scale,weights = load_predictor(args.checkpoint, device=args.device)
+    if cfg.get("prepared_id") != prepared["prepared_id"]:
+        raise ValueError("Checkpoint and prepared dataset identifiers differ")
+    unknown = set(args.operators or ()) - set(DEGRADATIONS)
+    if unknown: raise ValueError(f"Unknown degradations: {sorted(unknown)}")
+    operators = args.operators or list(DEGRADATIONS)
+    calibration = prepared["calibration"]
+    cases = prepared["split"]["val"][:args.max_cases] if args.max_cases else prepared["split"]["val"]
+    output = Path(args.output)
+    if output.exists() and any(output.iterdir()): raise FileExistsError(f"Output is not empty: {output}")
+    (output/"conditions").mkdir(parents=True)
+    size = prepared["image_size"]
+    settings = [("none", 0.)] + [(name, level) for name in operators for level in DEGRADATIONS[name].levels]
+    rows = []
+    for index, case in enumerate(cases):
+        for variant in prepared["variants"]:
+            root = Path(prepared["data_root"])/case/"projections"
+            raw = [np.load(root/f"{variant}_{name}.npy", allow_pickle=False) for name in ("full","left","right")]
+            for name, level in settings:
+                if name == "none":
+                    full, left, right = raw
+                else:
+                    full, left, right = degrade(name, level, *raw, model_size=size, seed=args.seed)
+                left, right = resize_raw(left, size), resize_raw(right, size)
+                oracle = left + right
+                condition, _ = map_intensity(resize_raw(full, size), args.mapping, calibration)
+                d,_,_ = predict(model, family, cfg, scale, condition, seed=args.seed)
+                if index == 0 and variant == prepared["variants"][0]:
+                    Image.fromarray(np.clip(condition/6*255, 0, 255).astype(np.uint8)).save(
+                        output/"conditions"/f"{name}_{level:g}.png")
+                predictions = [(family, oracle/2+d, oracle/2-d)]
+                if name == "none": predictions.append(("full_half", oracle/2, oracle/2))
+                for method, lp, rp in predictions:
+                    metrics = flatten_metrics(branch_metrics(lp, rp, left, right, full=oracle, data_range=6.))
+                    metrics["d_rms_over_scale"] = float(np.sqrt(np.mean(np.square((lp-rp)/2)))/scale)
+                    metrics["condition_saturation_fraction"] = float(np.mean((condition < 0) | (condition > 6)))
+                    rows.append(dict(case=case, variant=variant, method=method, operator=name, level=level,
+                                     **{k: v for k, v in metrics.items() if not k.startswith("full_half_baseline")}))
+    with (output/"metrics.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(rows)
+    summary = []
+    for method, name, level in dict.fromkeys((r["method"], r["operator"], r["level"]) for r in rows):
+        selected = [r for r in rows if (r["method"], r["operator"], r["level"]) == (method, name, level)]
+        # Average variants within each patient before averaging patients.
+        means = {key: float(np.nanmean([np.mean([r[key] for r in selected if r["case"] == case]) for case in cases]))
+                 for key in STRESS_SUMMARY_KEYS}
+        means = {key: value if math.isfinite(value) else str(value) for key, value in means.items()}
+        spec = DEGRADATIONS.get(name)
+        summary.append(dict(method=method, operator=name, level=level, kind=spec.kind if spec else None,
+                            description=spec.description if spec else "clean condition", **means))
+    write_json(output/"summary.json", dict(rows=summary, prepared_id=prepared["prepared_id"], mapping=args.mapping,
+               checkpoint_sha256=sha256(args.checkpoint), weights=weights, seed=args.seed, d_scale=scale,
+               decoder="oracle clean F: L=F/2+D; R=F/2-D", cases=cases, cohort="validation_only"))
     return summary
