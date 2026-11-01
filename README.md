@@ -2,6 +2,13 @@
 
 从 CBCT 生成物理一致的 Full/Left/Right 投影，并训练只预测左右差异的 diffusion、flow matching、ResUNet 和 Pix2Pix 模型。支持无配对目标的合成投影和真实侧位片推理。
 
+## 项目背景与永久知识
+
+先读 [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md)：其中总结数据来源、CBCT 预处理、
+双输出/sum-difference 到 D-only 的建模来路，以及合成 256×256 训练、真实 512→256
+推理效果不理想的历史结论和限制。本文继续负责安装与运行；协作规则见 [AGENTS.md](AGENTS.md)。
+本次文档补全不新增旧探索实验；此前保存在本地的历史结果仍按原索引保留，不随 clone 下载。
+
 ## 安装
 
 需要 Python 3.10+。先按自己的 CUDA 环境安装 PyTorch，再安装本项目：
