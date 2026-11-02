@@ -75,7 +75,13 @@ def unsharp(full, amount, *, model_size, **_):
 def equalize(full, blend, **_):
     """Blend toward global histogram equalization within the image's range."""
     if blend == 0: return full
-    ranks = np.argsort(np.argsort(full, axis=None)).reshape(full.shape) / max(full.size - 1, 1)
+    # Equal intensities must map equally: rank-per-pixel creates deterministic
+    # texture in the constant background and is not histogram equalization.
+    values, inverse, counts = np.unique(full, return_inverse=True, return_counts=True)
+    cdf = np.cumsum(counts).astype(np.float64)
+    if len(values) < 2:
+        return full.copy()
+    ranks = ((cdf - cdf[0]) / (cdf[-1] - cdf[0]))[inverse].reshape(full.shape)
     low, high = float(full.min()), float(full.max())
     return ((1 - blend) * full + blend * (low + ranks * (high - low))).astype(np.float32)
 

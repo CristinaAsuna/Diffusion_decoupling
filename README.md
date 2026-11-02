@@ -175,7 +175,9 @@ decouple infer --checkpoint /path/to/checkpoint.pt \
 
 ## 5. 跨域诊断（无真实配对，不产生真实准确率）
 
-`stress-test` 在固定 val 患者上对 raw Full 施加受控退化，看 D 在什么条件下塌缩：
+已完成实验的结论与限制见 [合成到真实诊断总结](docs/SIM2REAL_DIAGNOSIS.md)。完整中间产物仅保存在本地。
+
+`stress-test` 在固定 val 患者上对 raw Full 施加受控退化，测量 D 对输入变化的敏感性：
 
 ```bash
 decouple stress-test --prepared artifacts/prepared \
@@ -190,6 +192,15 @@ decouple stress-test --prepared artifacts/prepared \
 - 主要看 `asymmetry.energy_ratio`、`identity` 和 `d_rms_over_scale`：energy_ratio 趋近 0 表示塌缩到 Full/2。
 - `conditions/` 保存首个视图在各退化下的条件图，可与真实片目视对比。
 - 这些退化算子是诊断用近似，不是扫描仪标定。
+
+历史 D-only checkpoint 没有新接口的 `prepared_id` 时，不要重新默认划分或伪造 sidefix manifest。使用原训练强度参考创建仅诊断适配：
+
+```bash
+python scripts/prepare_historical_diagnostics.py --checkpoint /path/to/native.pt \
+  --calibration /path/to/train_only_calibration.json --output artifacts/prepared_historical
+```
+
+该适配保留 checkpoint 的实际患者划分、固定 scale、验证数据与校准文件哈希，并将侧别标为 `historical_stored_order_unverified`；禁止用于训练。历史 raw 诊断保留归一化再缩放顺序，quantile 是另一输入协议。`energy_ratio` 实际为 RMS 比，不能把真实预测幅度增加视为准确率提升。quantile 下无定义的常量图映射写入 `skipped.json`；raw 下仍保留信息擦除对照。压力测试和域统计默认只保存统计及少量预览；需要逐样本条件、D/GT等数值数组时显式加 `--save-arrays`。直方图均衡化保留相同亮度像素的相同输出。
 
 `scripts/domain_stats.py` 比较真实片和 val DRR 的条件统计：径向功率谱、梯度分位数、前景比例和直方图。传 `--checkpoint` 时会再报告预测 D 的 RMS/s_D 及 GT 参考值；加 `--sweep` 会对真实片遍历反相、鼻尖朝向和中心缩放：
 

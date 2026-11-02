@@ -12,6 +12,9 @@ operating guide. Update the appropriate document after verified interface/contra
 changes. Label observations, open questions and verified results distinctly. Preserve
 historical failure lessons without copying experiment diaries or exhaustive score tables.
 Local source paths live in ignored `artifacts/migration/`, not in tracked recipes.
+GitHub updates should contain concise conclusions and reusable code/tests. Keep
+raw predictions, figures, HTML reports, logs and one-off experiment tools local;
+do not publish the experiment workspace wholesale.
 
 ## Implementation and data contracts
 

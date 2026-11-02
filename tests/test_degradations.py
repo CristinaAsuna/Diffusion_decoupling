@@ -33,6 +33,14 @@ class DegradationTests(unittest.TestCase):
                 else:
                     np.testing.assert_allclose(full, left + right, atol=1e-5, err_msg=f"{name}={level}")
 
+    def test_equalization_preserves_tied_background_pixels(self):
+        full = np.zeros((8, 8), dtype=np.float32)
+        full[2:6, 2:6] = 2.
+        actual = degrade("equalize", 1., full, full/2, full/2, model_size=8)[0]
+        self.assertEqual(np.unique(actual[full == 0]).size, 1)
+        self.assertEqual(np.unique(actual[full == 2]).size, 1)
+        np.testing.assert_array_equal(actual, full)
+
     def test_noise_is_seeded(self):
         first = degrade("noise", .1, self.full, self.left, self.right, model_size=16, seed=5)[0]
         second = degrade("noise", .1, self.full, self.left, self.right, model_size=16, seed=5)[0]

@@ -147,6 +147,8 @@ def read_prepared(path):
 
 def verify_prepared(prepared):
     """Reject stale statistics if source triplets changed after preparation."""
+    if prepared.get("provenance_mode") == HISTORICAL_CONTRACT:
+        return _verify_historical(prepared)
     if prepared.get("side_contract") != SIDE_CONTRACT:
         raise ValueError("Prepared data has an unsupported anatomical side contract")
     identity = dict(split=prepared["split"], normalization=prepared["d_normalization"],
@@ -162,6 +164,172 @@ def verify_prepared(prepared):
             raise ValueError(f"Prepared source changed; prepare a new dataset version: {path}")
 
 
+
+HISTORICAL_CONTRACT = "historical_stored_order_unverified"
+
+def _json_hash(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def _historical_contract(cfg):
+    """Resolve the *actual* embedded dataset enumeration without loading arrays."""
+    from consistent_cdm.baseline.common import build_dataset
+    result = {"split": {}, "samples": {}}
+    for partition in ("train", "val"):
+        dcfg = cfg["dataset"][partition]
+        if dcfg.get("type") != "case_folders":
+            raise ValueError("Historical diagnostics require case-folder provenance")
+        if dcfg.get("normalize") != "fixed_range_m11" or list(dcfg.get("value_range", [])) != [0, 6]:
+            raise ValueError("Historical diagnostic normalization must be fixed [0,6] to [-1,1]")
+        if list(dcfg.get("clip_range", [])) != [0, 6]:
+            raise ValueError("Historical diagnostics require the embedded [0,6] clipping contract")
+        dataset = build_dataset(dcfg)
+        cases = sorted({sample.name.split("__")[0] for sample in dataset.samples})
+        if not cases or any(not re.fullmatch(r"Bone_[0-9]+", case) for case in cases):
+            raise ValueError("Historical diagnostics accept Bone patients only; frozen SY is forbidden")
+        variants = list(dcfg.get("variants") or [])
+        if not variants or set(sample.name for sample in dataset.samples) != {c+"__"+v for c in cases for v in variants}:
+            raise ValueError("Incomplete historical patient/variant enumeration")
+        result["split"][partition] = cases
+        result["samples"][partition] = dataset.samples
+        size = dcfg.get("image_size")
+        if not isinstance(size, (list,tuple)) or len(size) != 2 or size[0] != size[1]:
+            raise ValueError("Historical diagnostics require square image_size")
+        if partition == "train":
+            result.update(image_size=int(size[0]), variants=variants,
+                          data_root=str(Path(dcfg["case_root"]).resolve()))
+        elif (result["image_size"] != size[0] or result["variants"] != variants or
+              result["data_root"] != str(Path(dcfg["case_root"]).resolve())):
+            raise ValueError("Embedded train/val interfaces disagree")
+    if set(result["split"]["train"]) & set(result["split"]["val"]):
+        raise ValueError("Historical patient partitions overlap")
+    return result
+
+
+def _historical_id(prepared):
+    return _json_hash({k: v for k, v in prepared.items() if k != "prepared_id"})
+
+
+def prepare_historical_diagnostics(checkpoint, calibration_path, output):
+    """Bind a read-only development adapter to one immutable native checkpoint.
+
+    Does not relabel anatomy, fit statistics, copy data or authorize training.
+    Only held-out projection arrays are hashed; embedded train enumeration is
+    inspected to bind the historical split, without loading training arrays.
+    """
+    from consistent_cdm.utils.checkpointing import load_checkpoint_file
+    state = load_checkpoint_file(checkpoint, torch.device("cpu"))
+    cfg = state["config"]
+    if cfg.get("prepared_id"):
+        raise ValueError("Use the original prepared dataset for modern checkpoints")
+    historical = _historical_contract(cfg)
+    normalization = state.get("d_normalization") or cfg["dataset"]["train"].get("d_only_normalization")
+    if not normalization or not math.isfinite(float(normalization["scale"])) or float(normalization["scale"]) <= 0:
+        raise ValueError("Missing embedded train-only D scale")
+    calibration_path = Path(calibration_path).resolve()
+    calibration = json.loads(calibration_path.read_text())
+    if calibration.get("scope") != "Bone_train_only" and calibration.get("source") != "train_patients_only":
+        raise ValueError("Calibration must have explicit train-only provenance")
+    if "train_case_ids" in calibration and sorted(calibration["train_case_ids"]) != historical["split"]["train"]:
+        raise ValueError("Calibration patient provenance differs from embedded train split")
+    ref = np.asarray(calibration.get("raw_full_quantiles", []))
+    if ref.shape != (3,) or not np.isfinite(ref).all() or np.any(np.diff(ref) <= 1e-8):
+        raise ValueError("Invalid train-only calibration")
+    root = Path(historical["data_root"])
+    samples = historical.pop("samples")
+    sources, projection_templates = [], None
+    for sample in samples["val"]:
+        case,variant = sample.name.split("__")
+        paths = [sample.condition_path, *sample.target_paths]
+        if len(paths) != 3:
+            raise ValueError("Historical adapter requires ordered Full/left/right")
+        expected = [f"{variant}_{name}.npy" for name in ("full", "left", "right")]
+        if [path.name for path in paths] != expected:
+            raise ValueError("Historical stored target order is not explicit Full/left/right")
+        templates = [str(path.relative_to(root / case)).replace(variant,"{variant}",1) for path in paths]
+        if projection_templates is None: projection_templates = templates
+        if projection_templates != templates: raise ValueError("Nonuniform historical projection layout")
+        sources.extend(dict(path=str(path.relative_to(root)), sha256=sha256(path)) for path in paths)
+    prepared = dict(schema_version=2, provenance_mode=HISTORICAL_CONTRACT, side_contract=HISTORICAL_CONTRACT,
+                    **historical, projection_templates=projection_templates,
+                    preprocessing="historical_normalize_before_resize", d_normalization=normalization,
+                    calibration=calibration, sources=sources,
+                    source_checkpoint=dict(path=str(Path(checkpoint).resolve()), sha256=sha256(checkpoint)),
+                    embedded_dataset_sha256=_json_hash(cfg["dataset"]),
+                    metadata_sources=[dict(path=str(calibration_path), sha256=sha256(calibration_path))],
+                    scope="diagnostics_only_no_training_no_frozen_test",
+                    quantile_protocol="raw_resize_then_per_image_quantile_mapping_not_historical_raw")
+    prepared["prepared_id"] = _historical_id(prepared)
+    output = Path(output)
+    if output.exists() and any(output.iterdir()): raise FileExistsError(f"Prepared output is not empty: {output}")
+    output.mkdir(parents=True, exist_ok=True)
+    write_json(output / "prepared.json", prepared)
+    return prepared
+
+
+def _verify_historical(prepared):
+    if prepared.get("schema_version") != 2 or prepared.get("side_contract") != HISTORICAL_CONTRACT:
+        raise ValueError("Unsupported historical diagnostic schema")
+    if prepared.get("prepared_id") != _historical_id(prepared):
+        raise ValueError("Historical prepared metadata changed")
+    if prepared.get("scope") != "diagnostics_only_no_training_no_frozen_test":
+        raise ValueError("Historical adapter is diagnostics only")
+    split = prepared["split"]
+    if set(split) != {"train", "val"} or any(not split[k] for k in split):
+        raise ValueError("Historical train/val partitions must be explicit")
+    ids = split["train"] + split["val"]
+    if len(ids) != len(set(ids)) or any(not re.fullmatch(r"Bone_[0-9]+", c) for c in ids):
+        raise ValueError("Overlapping or frozen/non-Bone patients in historical adapter")
+    root = Path(prepared["data_root"])
+    expected = {str(path.relative_to(root)) for case in split["val"] for variant in prepared["variants"]
+                for path in projection_paths(prepared, case, variant)}
+    if expected != {entry["path"] for entry in prepared["sources"]}:
+        raise ValueError("Historical source manifest does not cover the validation cohort")
+    for item in prepared["sources"]:
+        path = root / item["path"]
+        if not path.is_file() or sha256(path) != item["sha256"]:
+            raise ValueError(f"Historical prepared source changed: {path}")
+    for item in prepared["metadata_sources"]:
+        if not Path(item["path"]).is_file() or sha256(item["path"]) != item["sha256"]:
+            raise ValueError("Historical calibration source changed")
+
+
+def verify_diagnostic_checkpoint(prepared, cfg, checkpoint):
+    if prepared.get("provenance_mode") != HISTORICAL_CONTRACT:
+        if cfg.get("prepared_id") != prepared["prepared_id"]:
+            raise ValueError("Checkpoint and prepared dataset identifiers differ")
+        return
+    binding = prepared["source_checkpoint"]
+    if sha256(checkpoint) != binding["sha256"] or _json_hash(cfg["dataset"]) != prepared["embedded_dataset_sha256"]:
+        raise ValueError("Historical checkpoint or embedded dataset binding differs")
+    actual = _historical_contract(cfg)
+    for key in ("split", "image_size", "variants", "data_root"):
+        if actual[key] != prepared[key]: raise ValueError(f"Historical checkpoint disagrees with {key}")
+    norm = cfg["dataset"]["train"].get("d_only_normalization")
+    if not norm or float(norm["scale"]) != float(prepared["d_normalization"]["scale"]):
+        raise ValueError("Historical checkpoint disagrees with train-only scale")
+
+
+def projection_paths(prepared, case, variant):
+    if case not in prepared["split"]["val"]:
+        raise ValueError("Diagnostic projection access requires a declared validation patient")
+    templates = prepared.get("projection_templates", ["projections/{variant}_full.npy",
+                           "projections/{variant}_left.npy", "projections/{variant}_right.npy"])
+    return [Path(prepared["data_root"])/case/t.format(variant=variant) for t in templates]
+
+
+def diagnostic_predict(model, family, cfg, scale, full_source, prepared, *, mapping="raw", seed=1234):
+    size = prepared["image_size"]
+    raw = resize_raw(full_source, size)
+    mapped,_ = map_intensity(raw, mapping, prepared["calibration"])
+    normalized = None
+    if mapping == "raw" and prepared.get("preprocessing") == "historical_normalize_before_resize":
+        # Reproduce the historical normalized tensor exactly; avoid an inverse
+        # affine followed by another affine, which adds rounding differences.
+        normalized = resize_raw(np.clip(np.asarray(full_source, np.float32),0,6)/3-1, size)
+    return predict(model, family, cfg, scale, mapped, seed=seed, normalized_condition=normalized)
+
+
 def recipe(family, path=None):
     if family not in FAMILIES:
         raise ValueError(f"Unknown family: {family}")
@@ -173,6 +341,8 @@ def recipe(family, path=None):
 
 
 def training_config(family, prepared, *, config=None, tiny=False):
+    if prepared.get("provenance_mode") == HISTORICAL_CONTRACT:
+        raise ValueError("Historical diagnostic prepared data cannot be used for training")
     cfg = copy.deepcopy(recipe(family, config))
     cfg["family"] = family
     cfg["prepared_id"] = prepared["prepared_id"]
@@ -314,9 +484,11 @@ def load_predictor(checkpoint, *, device="cpu", family=None, config=None):
 
 
 @torch.no_grad()
-def predict(model, family, cfg, scale, full_raw, *, seed=1234):
+def predict(model, family, cfg, scale, full_raw, *, seed=1234, normalized_condition=None):
     device = next(model.parameters()).device
-    condition = torch.from_numpy(np.clip(full_raw, 0, 6).copy())[None,None].to(device) / 3 - 1
+    condition = (torch.from_numpy(np.clip(full_raw, 0, 6).copy())[None,None].to(device) / 3 - 1
+                 if normalized_condition is None else
+                 torch.from_numpy(np.asarray(normalized_condition, np.float32).copy())[None,None].to(device))
     torch.manual_seed(seed)
     if device.type == "cuda": torch.cuda.manual_seed_all(seed)
     if family in ("diffusion", "flow_matching"):
@@ -423,17 +595,18 @@ def evaluate(args):
     prepared = read_prepared(args.prepared)
     verify_prepared(prepared)
     model,cfg,family,scale,weights = load_predictor(args.checkpoint, device=args.device)
-    if cfg.get("prepared_id") != prepared["prepared_id"]:
-        raise ValueError("Checkpoint and prepared dataset identifiers differ")
+    verify_diagnostic_checkpoint(prepared, cfg, args.checkpoint)
     output = Path(args.output)
     if output.exists() and any(output.iterdir()): raise FileExistsError(f"Output is not empty: {output}")
     output.mkdir(parents=True,exist_ok=True)
     rows=[]; size=prepared["image_size"]
     for case in prepared["split"]["val"]:
         for variant in prepared["variants"]:
-            root=Path(prepared["data_root"])/case/"projections"
-            full,left,right=[resize_raw(np.load(root/f"{variant}_{name}.npy",allow_pickle=False),size) for name in ("full","left","right")]
-            d,lp,rp=predict(model,family,cfg,scale,full,seed=args.seed)
+            originals=[np.load(path,allow_pickle=False) for path in projection_paths(prepared,case,variant)]
+            full,left,right=[resize_raw(value,size) for value in originals]
+            d,_,_=diagnostic_predict(model,family,cfg,scale,originals[0],prepared,seed=args.seed)
+            lp,rp=full/2+d,full/2-d
+            print(f"evaluate {case}/{variant}",flush=True)
             save_prediction(output/f"{case}__{variant}",full,d,lp,rp,d_cap=scale)
             for method,l,r in ((family,lp,rp),("full_half",full/2,full/2)):
                 metrics=flatten_metrics(branch_metrics(l,r,left,right,full=full,data_range=6.))
@@ -453,7 +626,8 @@ def evaluate(args):
         if isinstance(value,float) and not math.isfinite(value): return str(value)
         return value
     write_json(output/"summary.json",finite(dict(patient_macro=summary,prepared_id=prepared["prepared_id"],
-               checkpoint_sha256=sha256(args.checkpoint),weights=weights,seed=args.seed,cohort="validation_only")))
+               checkpoint_sha256=sha256(args.checkpoint),weights=weights,seed=args.seed,cohort="validation_only",
+               side_contract=prepared["side_contract"],preprocessing=prepared.get("preprocessing","raw_resize_then_normalize"))))
     return summary
 
 
@@ -474,23 +648,22 @@ def stress_test(args):
     prepared = read_prepared(args.prepared)
     verify_prepared(prepared)
     model,cfg,family,scale,weights = load_predictor(args.checkpoint, device=args.device)
-    if cfg.get("prepared_id") != prepared["prepared_id"]:
-        raise ValueError("Checkpoint and prepared dataset identifiers differ")
+    verify_diagnostic_checkpoint(prepared, cfg, args.checkpoint)
     unknown = set(args.operators or ()) - set(DEGRADATIONS)
     if unknown: raise ValueError(f"Unknown degradations: {sorted(unknown)}")
     operators = args.operators or list(DEGRADATIONS)
     calibration = prepared["calibration"]
+    if args.max_cases is not None and args.max_cases < 1: raise ValueError("max-cases must be positive")
     cases = prepared["split"]["val"][:args.max_cases] if args.max_cases else prepared["split"]["val"]
     output = Path(args.output)
     if output.exists() and any(output.iterdir()): raise FileExistsError(f"Output is not empty: {output}")
     (output/"conditions").mkdir(parents=True)
     size = prepared["image_size"]
     settings = [("none", 0.)] + [(name, level) for name in operators for level in DEGRADATIONS[name].levels]
-    rows = []
+    rows = []; skipped = []
     for index, case in enumerate(cases):
         for variant in prepared["variants"]:
-            root = Path(prepared["data_root"])/case/"projections"
-            raw = [np.load(root/f"{variant}_{name}.npy", allow_pickle=False) for name in ("full","left","right")]
+            raw = [np.load(path, allow_pickle=False) for path in projection_paths(prepared,case,variant)]
             for name, level in settings:
                 if name == "none":
                     full, left, right = raw
@@ -498,8 +671,21 @@ def stress_test(args):
                     full, left, right = degrade(name, level, *raw, model_size=size, seed=args.seed)
                 left, right = resize_raw(left, size), resize_raw(right, size)
                 oracle = left + right
-                condition, _ = map_intensity(resize_raw(full, size), args.mapping, calibration)
-                d,_,_ = predict(model, family, cfg, scale, condition, seed=args.seed)
+                try:
+                    resized = resize_raw(full,size)
+                    if args.mapping == "quantile" and float(np.ptp(resized)) <= max(1e-7, float(np.max(np.abs(resized)))*1e-6):
+                        raise ValueError("Input has degenerate intensity quantiles (information erased)")
+                    condition, _ = map_intensity(resized, args.mapping, calibration)
+                except ValueError as error:
+                    if "degenerate intensity quantiles" not in str(error): raise
+                    skipped.append(dict(case=case,variant=variant,operator=name,level=level,reason=str(error)))
+                    continue
+                d,_,_ = diagnostic_predict(model,family,cfg,scale,full,prepared,mapping=args.mapping,seed=args.seed)
+                if getattr(args,"save_arrays",False):
+                    item=output/"arrays"/case/variant/f"{name}_{level:g}"
+                    item.mkdir(parents=True)
+                    for key,value in (("condition",condition),("d",d),("gt_d",(left-right)/2),("oracle_full",oracle)):
+                        np.save(item/f"{key}.npy",np.asarray(value,np.float32))
                 if index == 0 and variant == prepared["variants"][0]:
                     Image.fromarray(np.clip(condition/6*255, 0, 255).astype(np.uint8)).save(
                         output/"conditions"/f"{name}_{level:g}.png")
@@ -511,6 +697,8 @@ def stress_test(args):
                     metrics["condition_saturation_fraction"] = float(np.mean((condition < 0) | (condition > 6)))
                     rows.append(dict(case=case, variant=variant, method=method, operator=name, level=level,
                                      **{k: v for k, v in metrics.items() if not k.startswith("full_half_baseline")}))
+            print(f"stress {index+1}/{len(cases)} {case}/{variant} mapping={args.mapping}",flush=True)
+    write_json(output/"skipped.json",skipped)
     with (output/"metrics.csv").open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(rows)
     summary = []
@@ -525,5 +713,7 @@ def stress_test(args):
                             description=spec.description if spec else "clean condition", **means))
     write_json(output/"summary.json", dict(rows=summary, prepared_id=prepared["prepared_id"], mapping=args.mapping,
                checkpoint_sha256=sha256(args.checkpoint), weights=weights, seed=args.seed, d_scale=scale,
-               decoder="oracle clean F: L=F/2+D; R=F/2-D", cases=cases, cohort="validation_only"))
+               decoder="oracle F (geometrically transformed for geometric controls): L=F/2+D; R=F/2-D", cases=cases, cohort="validation_only",
+               side_contract=prepared["side_contract"],skipped_count=len(skipped),save_arrays=bool(getattr(args,"save_arrays",False)),
+               preprocessing=(prepared.get("preprocessing","raw_resize_then_normalize") if args.mapping=="raw" else "raw_resize_then_per_image_quantile_mapping")))
     return summary

@@ -54,6 +54,7 @@ def main(argv=None):
     stress.add_argument("--max-cases",type=int,help="Use only the first N validation patients")
     stress.add_argument("--seed",type=int,default=1234)
     stress.add_argument("--device",default="cpu")
+    stress.add_argument("--save-arrays",action="store_true",help="Export per-view numerical arrays; disabled by default")
     args=parser.parse_args(argv)
     from consistent_cdm import runtime
     try:
