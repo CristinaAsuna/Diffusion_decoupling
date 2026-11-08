@@ -12,6 +12,24 @@ sum/difference 参数化，以及只预测差异的 D-only 模型。历史主线
 256×256。真实侧位片推理效果不理想（用户观察），尚未得到可靠的真实左右分解。
 这项迁移保留可复用代码和上述背景，不代表已经解决合成到真实的泛化问题。
 
+## 从数据到结果：完整 pipeline
+
+```text
+外部 CBCT NIfTI + 分割（或自行提供 nnU-Net 权重）
+  → 物理空间对齐与左右划分 → 共用几何的 DRR 渲染
+  → 每患者 std/aug 的 512×512 Full / Left / Right 和 manifest
+  → 按患者划分训练/验证 → 仅用训练集计算 D scale 和强度参考
+  → 默认 256×256：Full 作条件，(Left−Right)/2 作监督目标
+  → diffusion / flow matching / ResUNet / Pix2Pix 预测 D
+  → 使用原始 Full 硬解码得到 Left / Right
+  → 合成配对验证；或对外部真实侧位片作无配对推理
+```
+
+从已有合成投影开始时可跳过 CBCT 渲染，但仍须满足 README 的 manifest、
+可加性和侧别契约。已有 checkpoint 也可跳过训练直接推理；其 D scale、
+输入尺寸与强度参考必须来自对应 checkpoint/训练流程。数据准备、训练和
+推理的可执行命令及输出目录见 [README 第 1–4 节](README.md#1-cbct--flr)。
+
 ## 数据从哪里来
 
 以下是历史数据的来路，**不是仓库自带的数据，也不是新运行默认使用的固定队列**。
@@ -58,6 +76,16 @@ sum/difference 参数化，以及只预测差异的 D-only 模型。历史主线
 这部分及 CeLDA 检测器未迁入；现有 CeLDA 匿名点也没有与 26 个语义点建立可靠映射。
 本仓库不能据模型输出给出有效的 landmark 定位结论。
 
+### 预处理代码导航
+
+| 阶段 | 代码 | 输入 → 输出 / 关键约束 |
+|---|---|---|
+| 命令与编排 | [cli.py](Data_process/src/cbct_preprocess/cli.py)、[pipeline.py](Data_process/src/cbct_preprocess/pipeline.py) | 单例或批量 NIfTI → 每例产物和 manifest；失败单例会记录状态 |
+| 读取与分割 | [io.py](Data_process/src/cbct_preprocess/io.py)、[nnunet.py](Data_process/src/cbct_preprocess/nnunet.py) | 读取物理值与图像几何；自带分割或调用独立安装的 nnU-Net |
+| 中面与对齐 | [midplane.py](Data_process/src/cbct_preprocess/midplane.py)、[alignment.py](Data_process/src/cbct_preprocess/alignment.py) | label 8/9 质心 → LPS 中面与统一刚性重采样 |
+| 侧别与衰减 | [side_contract.py](Data_process/src/cbct_preprocess/side_contract.py)、[split.py](Data_process/src/cbct_preprocess/split.py) | 互补左右区域 → 衰减体；校验解剖侧别 |
+| 投影与记录 | [drr_geometry.py](Data_process/src/cbct_preprocess/drr_geometry.py)、[drr_renderer.py](Data_process/src/cbct_preprocess/drr_renderer.py)、[manifest.py](Data_process/src/cbct_preprocess/manifest.py) | 同一套射线及像素变换 → F/L/R NPY、几何和质控记录 |
+
 ## 生成模型代码怎样工作
 
 旧 Branch-UNet 用 Full 条件和带噪目标拼接输入，共享编码器/中间层，可用独立解码头。
@@ -87,6 +115,24 @@ condition 单独裁剪并映射 `[0,6]→[-1,1]`；解码仍用原始 Full。
 | [model/flow_matching.py](consistent_cdm/model/flow_matching.py) | 条件直线路径 flow matching、速度 MSE、EMA；默认 Heun 30 步 |
 | [baseline](consistent_cdm/baseline) | ResUNet-96 的 D-L1；Pix2Pix-64 的条件 PatchGAN、hinge GAN + 100×D-L1 |
 | [recipes](consistent_cdm/recipes)、[evaluation/data_metrics.py](consistent_cdm/evaluation/data_metrics.py) | 默认配方与统一 D/分支指标；保留 Full/2 基线，不自动交换左右 |
+
+### 模型训练与推理的数据流
+
+1. `prepare-data` 从每个患者的 manifest 和 F/L/R NPY 建立患者级 split，
+   然后展开视图；训练集的 `s_D`、Full 强度参考和文件校验信息随准备结果保存。
+2. [dataset.py](consistent_cdm/data/dataset.py) 读取投影并转换到模型尺寸；
+   [targets.py](consistent_cdm/contracts/targets.py) 定义目标和解码，
+   [factories](consistent_cdm/factories) 按配置构建网络。
+3. diffusion 将带噪的单通道 D 与 Full 条件送入 U-Net，学习 v-prediction；
+   flow matching 学习条件速度场。两者分别经 DPM-Solver++ 或 Heun 从噪声采样。
+   ResUNet 与 Pix2Pix 则直接由 Full 预测 D；四者使用相同的 D 定义和解码规则。
+4. checkpoint 保存模型配置和 D scale；推理时 Full 无需左右真值。
+   raw Full 与预测 D 经硬解码得到左右图。合成数据可对配对真值和 Full/2 基线
+   评价；真实 JPG 没有配对真值，只能报告推理结果和有边界的诊断。
+
+冻结表征研究的已发表汇总见 [图文报告](docs/REPRESENTATION_REPORT.md) 和
+[方法总结](docs/REPRESENTATION_ANALYSIS.md)。这两份是研究记录，不能据此假定
+所有研究脚本、特征、权重和病例图随仓库发布。
 
 ## 必须保留的历史结论和限制
 
